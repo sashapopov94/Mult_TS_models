@@ -1,0 +1,92 @@
+# Read the data
+library(tidyverse)
+library(magrittr)
+library(forecast)
+library(xts)
+library(furrr)
+library(yardstick)
+library(tsintermittent)
+
+
+dat <- read.csv('/home/aleksandar/Projects/stars94_by_item.csv', header=T, sep=";")
+colnames(dat) <- c("item", "datetime", "qty")
+dat$datetime <- as.Date(dat$datetime)
+dat <- as_tibble(dat)
+
+# Train and Test Data
+
+# Train data is 80% of all data for every pair of item and sale point. 
+# Test data is what's left.
+
+dat %<>% group_by(item) %>% nest() %>% mutate(train=map(data, ~ head(data[[1]], round(nrow(data[[1]])*0.8))), test=map(data, ~ tail(data[[1]], nrow(data[[1]])-nrow(train[[1]]))))
+
+
+
+# data functions
+
+data_funs <- list(xts=function(x) xts(x$qty, x$datetime))
+
+data_funs %<>% rep(nrow(unique(dat[,c("item")]))) %>% enframe("data_fun_name", "data_fun") %>% mutate(unique(dat[c("item")]))
+
+
+# Join the two tables
+
+dat %<>% left_join(data_funs)
+
+# Models 
+
+models_to_compute <- list(
+   auto.arima = function(x) auto.arima(x),
+   #ets = function(x) ets(x),
+   #stlm = function(x) stlm(x)
+   tbats = function(x) tbats(x, use.box.cox = FALSE),
+   hw_beta = function(x) HoltWinters(x, beta=F),
+   hw_gamma = function(x) HolwWinters(x, gamma=F),
+   hw_beta_gamma = function(x) HoltWinters(x, beta=F, gamma=F)
+)
+
+models_ready <- list(
+   naive = function(x, h) naive(x, h=h),
+   rwf   = function(x, h) rwf(x, h=h),
+   snaive = function(x, h) snaive(x, h=h)
+)
+
+models_to_compute %<>% enframe("model_name", "model")
+models_ready %<>% enframe("model_name", "model")
+
+# Cartesian product to join the models tibble with the by_item tibble 
+
+dat_to_compute <- dat %>% crossing(models_to_compute)
+dat_ready <- dat %>% crossing(models_ready)
+
+# invoke function on data 
+
+plan(multisession, workers = 7)
+#plan(multicore, workers = 7)
+
+dat_to_compute %<>% mutate(data_xts=pmap(list(data_fun, train), exec))
+dat_ready %<>% mutate(data_xts=pmap(list(data_fun, train), exec))
+dat_to_compute %<>% mutate(fitted=future_pmap(list(model, data_xts), exec, .progress=T))
+
+plan(sequential)
+
+# Calculate test errors
+
+dat_to_compute %<>% mutate(forecast=map2(fitted, test, \(x, y) forecast(x, h=nrow(y))))
+dat_ready %<>% mutate(forecast=pmap(list(model, data_xts, test),  \(x, y, z) exec(x, y, h=nrow(z))))
+dat_to_compute %<>% mutate(error=map2_dbl(forecast, test, \(x, y) rmse_vec(truth=y$qty, estimate=x$mean)))
+dat_ready %<>% mutate(error=map2_dbl(forecast, test, \(x, y) rmse_vec(truth=y$qty, estimate=x$mean)))
+dat_to_compute %<>% select(-fitted) 
+
+dat <- rbind(dat_to_compute, dat_ready)
+
+# Visualize errors along with model name for each item
+#dat %>% arrange(item, error) %>% select(item, model_name, error)
+
+# Choose the best model 
+
+result <- dat %>% group_by(item) %>% filter(!is.na(error)) %>% filter(error==min(error)) %>% select(item, model_name, error) %>% slice(1)
+
+result
+
+
