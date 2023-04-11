@@ -1,4 +1,4 @@
-# Read the data
+# Necceasary libraries
 library(tidyverse)
 library(magrittr)
 library(forecast)
@@ -8,12 +8,14 @@ library(yardstick)
 library(tsintermittent)
 
 
+# Load data
+
 dat <- read.csv('/home/aleksandar/Projects/stars94_by_item.csv', header=T, sep=";")
 colnames(dat) <- c("item", "datetime", "qty")
 dat$datetime <- as.Date(dat$datetime)
 dat <- as_tibble(dat)
 
-# Train and Test Data
+# Train and Test Data. First phase - best model selection( cross validation).
 
 # Train data is 80% of all data for every pair of item and sale point. 
 # Test data is what's left.
@@ -22,15 +24,19 @@ dat %<>% group_by(item) %>% nest() %>% mutate(train=map(data, ~ head(data[[1]], 
 
 
 
-# data functions
+# data functions to convert data to time series data
 
+# Functions that convert data to time series may behave differently (some put 0 in missing places).
 data_funs <- list(xts=function(x) xts(x$qty, x$datetime))
 
+
+# split data into item buckets - rep(nrow(unique(dat[,c("item")]))) + mutate(unique(dat[c("item")]))
+# creates table with structure - name, function ( ts convert)
 data_funs %<>% rep(nrow(unique(dat[,c("item")]))) %>% enframe("data_fun_name", "data_fun") %>% mutate(unique(dat[c("item")]))
 
 
 # Join the two tables
-
+# generates bigger table 
 dat %<>% left_join(data_funs)
 
 # Models 
@@ -39,10 +45,10 @@ models_to_compute <- list(
    auto.arima = function(x) auto.arima(x),
    #ets = function(x) ets(x),
    #stlm = function(x) stlm(x)
-   tbats = function(x) tbats(x, use.box.cox = FALSE),
-   hw_beta = function(x) HoltWinters(x, beta=F),
-   hw_gamma = function(x) HolwWinters(x, gamma=F),
-   hw_beta_gamma = function(x) HoltWinters(x, beta=F, gamma=F)
+   tbats = function(x) tbats(x, use.box.cox = FALSE)
+   #hw_beta = function(x) HoltWinters(x, beta=F),
+   #hw_gamma = function(x) HolwWinters(x, gamma=F),
+   #hw_beta_gamma = function(x) HoltWinters(x, beta=F, gamma=F)
 )
 
 models_ready <- list(
